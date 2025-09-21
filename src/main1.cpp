@@ -177,8 +177,12 @@ unsigned long getTimeCallback()
 
 // Fixed speed settings
 #define MOTOR_SPEED 255     // Full speed for straight movement (0-255)
-#define TURN_SPEED_HIGH 225 // Higher speed for outer wheel during turn
-#define TURN_SPEED_LOW 125  // Lower speed for inner wheel during turn
+#define TURN_SPEED_HIGH 255 // Higher speed for outer wheel during turn
+#define TURN_SPEED_LOW 220  // Lower speed for inner wheel during turn
+
+// Tank turn speed settings for stationary rotation
+#define TANK_SPEED_HIGH 255 // Higher speed motor for tank turn
+#define TANK_SPEED_LOW 120  // Lower speed motor for tank turn (balanced force)
 
 bool car_forward = 0;
 bool car_backward = 0;
@@ -295,25 +299,15 @@ void carforward()
 {
     analogWrite(ENA, MOTOR_SPEED);
     analogWrite(ENB, MOTOR_SPEED);
-    digitalWrite(IN1, HIGH);
-    digitalWrite(IN2, LOW);
-    digitalWrite(IN3, HIGH);
-    digitalWrite(IN4, LOW);
-}
-void carbackward()
-{
-    analogWrite(ENA, MOTOR_SPEED);
-    analogWrite(ENB, MOTOR_SPEED);
     digitalWrite(IN1, LOW);
     digitalWrite(IN2, HIGH);
     digitalWrite(IN3, LOW);
     digitalWrite(IN4, HIGH);
 }
-void carturnleft()
+void carbackward()
 {
-    // Left turn: left motor slower, right motor faster
-    analogWrite(ENA, TURN_SPEED_LOW);  // Left motor slower
-    analogWrite(ENB, TURN_SPEED_HIGH); // Right motor faster
+    analogWrite(ENA, MOTOR_SPEED);
+    analogWrite(ENB, MOTOR_SPEED);
     digitalWrite(IN1, HIGH);
     digitalWrite(IN2, LOW);
     digitalWrite(IN3, HIGH);
@@ -321,13 +315,23 @@ void carturnleft()
 }
 void carturnright()
 {
-    // Right turn: right motor slower, left motor faster
+    // Right turn while moving forward: both motors forward, right slower
     analogWrite(ENA, TURN_SPEED_HIGH); // Left motor faster
     analogWrite(ENB, TURN_SPEED_LOW);  // Right motor slower
-    digitalWrite(IN1, HIGH);
-    digitalWrite(IN2, LOW);
-    digitalWrite(IN3, HIGH);
-    digitalWrite(IN4, LOW);
+    digitalWrite(IN1, LOW);            // Left motor forward (same as carforward)
+    digitalWrite(IN2, HIGH);
+    digitalWrite(IN3, LOW);            // Right motor forward (same as carforward)
+    digitalWrite(IN4, HIGH);
+}
+void carturnleft()
+{
+    // Left turn while moving forward: both motors forward, left slower
+    analogWrite(ENA, TURN_SPEED_LOW);   // Left motor slower
+    analogWrite(ENB, TURN_SPEED_HIGH);  // Right motor faster
+    digitalWrite(IN1, LOW);             // Left motor forward (same as carforward)
+    digitalWrite(IN2, HIGH);
+    digitalWrite(IN3, LOW);             // Right motor forward (same as carforward)
+    digitalWrite(IN4, HIGH);
 }
 void carStop()
 {
@@ -339,22 +343,24 @@ void carStop()
 
 void cartankleft()
 {
-    // Tank turn left: left motor backward, right motor forward
-    analogWrite(ENA, MOTOR_SPEED); // Left motor full speed
-    analogWrite(ENB, MOTOR_SPEED); // Right motor full speed
-    digitalWrite(IN1, LOW);        // Left motor backward
+    // Tank turn right: left motor forward, right motor backward
+    // Differential speed creates rotation while keeping car stationary
+    analogWrite(ENA, TANK_SPEED_LOW);  // Left motor forward (faster)
+    analogWrite(ENB, TANK_SPEED_HIGH); // Right motor backward (slower)
+    digitalWrite(IN1, LOW);            // Left motor forward
     digitalWrite(IN2, HIGH);
-    digitalWrite(IN3, HIGH); // Right motor forward
+    digitalWrite(IN3, HIGH); // Right motor backward
     digitalWrite(IN4, LOW);
 }
 
 void cartankright()
 {
-    // Tank turn right: left motor forward, right motor backward
-    analogWrite(ENA, MOTOR_SPEED); // Left motor full speed
-    analogWrite(ENB, MOTOR_SPEED); // Right motor full speed
-    digitalWrite(IN1, HIGH);       // Left motor forward
+    // Tank turn left: left motor backward, right motor forward
+    // Differential speed creates rotation while keeping car stationary
+    analogWrite(ENA, TANK_SPEED_LOW);  // Left motor backward (slower)
+    analogWrite(ENB, TANK_SPEED_HIGH); // Right motor forward (faster)
+    digitalWrite(IN1, HIGH);           // Left motor backward
     digitalWrite(IN2, LOW);
-    digitalWrite(IN3, LOW); // Right motor backward
+    digitalWrite(IN3, LOW); // Right motor forward
     digitalWrite(IN4, HIGH);
 }
