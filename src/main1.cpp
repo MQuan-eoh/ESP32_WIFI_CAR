@@ -202,6 +202,20 @@ unsigned long getTimeCallback()
 #define MIN_DISTANCE 20      // Minimum safe distance in cm
 #define CRITICAL_DISTANCE 10 // Critical distance for immediate stop
 
+// Emergency interrupt settings
+#define EMERGENCY_CHECK_INTERVAL 200 // Check every 200ms for emergency (reduced frequency)
+#define DISTANCE_TIMEOUT 10000       // 10ms timeout for distance measurement (faster)
+
+// Emergency safety variables (volatile for interrupt safety)
+volatile bool emergencyStop = false;
+volatile bool safeToMove = true;
+volatile unsigned long lastEmergencyCheck = 0;
+volatile bool needDistanceCheck = false;  // Flag to trigger distance check in main loop
+
+// Hardware timer for emergency checks
+hw_timer_t *emergencyTimer = NULL;
+portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
+
 // Initialize LCD (columns, rows, I2C address)
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
@@ -239,8 +253,8 @@ void displayCarStatus(String status)
     }
 }
 
-// Function to measure distance using HC-SR04
-float measureDistance()
+// Function to measure distance using HC-SR04 (optimized for speed)
+float measureDistanceFast()
 {
     digitalWrite(TRIG_PIN, LOW);
     delayMicroseconds(2);
@@ -248,7 +262,7 @@ float measureDistance()
     delayMicroseconds(10);
     digitalWrite(TRIG_PIN, LOW);
 
-    long duration = pulseIn(ECHO_PIN, HIGH, 30000); // 30ms timeout
+    long duration = pulseIn(ECHO_PIN, HIGH, DISTANCE_TIMEOUT); // Reduced timeout for faster response
     if (duration == 0)
     {
         return 999; // Return large value if no echo received
@@ -258,14 +272,97 @@ float measureDistance()
     return distance;
 }
 
+// CRITICAL: Emergency distance check (called by timer interrupt)
+void IRAM_ATTR emergencyDistanceCheck()
+{
+    portENTER_CRITICAL_ISR(&timerMux);
+
+    // Quick distance measurement in interrupt
+    static unsigned long lastCheck = 0;
+    unsigned long now = millis();
+
+    if (now - lastCheck >= EMERGENCY_CHECK_INTERVAL)
+    {
+        float distance = measureDistanceFast();
+
+        if (distance <= CRITICAL_DISTANCE && distance > 0)
+        {
+            emergencyStop = true;
+            safeToMove = false;
+
+            // IMMEDIATE MOTOR SHUTDOWN
+            digitalWrite(IN1, LOW);
+            digitalWrite(IN2, LOW);
+            digitalWrite(IN3, LOW);
+            digitalWrite(IN4, LOW);
+        }
+        else if (distance > MIN_DISTANCE)
+        {
+            emergencyStop = false;
+            safeToMove = true;
+        }
+
+        lastCheck = now;
+    }
+
+    portEXIT_CRITICAL_ISR(&timerMux);
+}
+
+// Emergency stop function - can be called from anywhere
+void emergencyStopMotors()
+{
+    portENTER_CRITICAL(&timerMux);
+    emergencyStop = true;
+    safeToMove = false;
+
+    // Immediate motor shutdown
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, LOW);
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, LOW);
+
+    portEXIT_CRITICAL(&timerMux);
+}
+
+// Safety check - MUST be called before any motor movement
+bool isSafeToMove()
+{
+    portENTER_CRITICAL(&timerMux);
+    bool safe = safeToMove && !emergencyStop;
+    portEXIT_CRITICAL(&timerMux);
+
+    if (!safe)
+    {
+        emergencyStopMotors();
+        displayCarStatus("EMERGENCY!");
+        return false;
+    }
+    return true;
+}
+
 // Function to handle LED warning for obstacles
+// Enhanced LED warning with emergency state
 void handleWarningLED()
 {
     unsigned long currentTime = millis();
 
-    if (obstacleDetected)
+    portENTER_CRITICAL(&timerMux);
+    bool isEmergency = emergencyStop;
+    portEXIT_CRITICAL(&timerMux);
+
+    if (isEmergency)
     {
-        // Blink LED when obstacle detected
+        // Fast blinking for emergency (100ms interval)
+        if (currentTime - lastLedBlink >= 100)
+        {
+            ledState = !ledState;
+            digitalWrite(WARNING_LED, ledState);
+            lastLedBlink = currentTime;
+        }
+    }
+    else if (obstacleDetected)
+    {
+        // Normal blinking for warning (300ms interval)
         if (currentTime - lastLedBlink >= LED_BLINK_INTERVAL)
         {
             ledState = !ledState;
@@ -275,20 +372,24 @@ void handleWarningLED()
     }
     else
     {
-        // Turn off LED when no obstacle
+        // Turn off LED when safe
         digitalWrite(WARNING_LED, LOW);
         ledState = false;
     }
 }
 
-// Function to check for obstacles
+// Function to check for obstacles (now uses interrupt data)
 void checkObstacles()
 {
     unsigned long currentTime = millis();
 
     if (currentTime - lastDistanceCheck >= DISTANCE_CHECK_INTERVAL)
     {
-        currentDistance = measureDistance();
+        // Get current distance (updated by interrupt)
+        portENTER_CRITICAL(&timerMux);
+        currentDistance = measureDistanceFast();
+        bool isEmergency = emergencyStop;
+        portEXIT_CRITICAL(&timerMux);
 
         if (currentDistance <= MIN_DISTANCE && currentDistance > 0)
         {
@@ -303,6 +404,12 @@ void checkObstacles()
 
         // Update LCD with distance info
         updateLCDWithDistance();
+
+        // Show emergency status if needed
+        if (isEmergency)
+        {
+            displayCarStatus("EMERGENCY!");
+        }
     }
 }
 
@@ -310,7 +417,17 @@ void checkObstacles()
 void updateLCDWithDistance()
 {
     lcd.setCursor(0, 1);
-    if (obstacleDetected)
+
+    // Priority: Emergency > Obstacle Warning > Normal Status
+    portENTER_CRITICAL(&timerMux);
+    bool isEmergency = emergencyStop;
+    portEXIT_CRITICAL(&timerMux);
+
+    if (isEmergency)
+    {
+        lcd.print("EMERGENCY STOP! ");
+    }
+    else if (obstacleDetected)
     {
         lcd.print("WARN: " + String((int)currentDistance) + "cm     ");
     }
@@ -349,6 +466,14 @@ void setup()
     // Initialize Warning LED pin
     pinMode(WARNING_LED, OUTPUT);
     digitalWrite(WARNING_LED, LOW);
+
+    // Initialize emergency timer interrupt (1000 ticks = 1ms, so 50000 = 50ms)
+    emergencyTimer = timerBegin(0, 80, true); // Timer 0, prescaler 80 (1MHz), count up
+    timerAttachInterrupt(emergencyTimer, &emergencyDistanceCheck, true);
+    timerAlarmWrite(emergencyTimer, 50000, true); // 50ms interval, repeat
+    timerAlarmEnable(emergencyTimer);
+
+    Serial.println("Emergency interrupt system initialized");
 
     displayCarStatus("CONNECTING");
     ERa.begin(ssid, pass);
@@ -457,14 +582,17 @@ void loop()
 
 void carforward()
 {
-    // Check for obstacles before moving forward
-    if (currentDistance <= CRITICAL_DISTANCE && currentDistance > 0)
+    // CRITICAL SAFETY CHECK - Must be first
+    if (!isSafeToMove())
     {
-        // Stop immediately if critical distance reached
-        digitalWrite(IN1, LOW);
-        digitalWrite(IN2, LOW);
-        digitalWrite(IN3, LOW);
-        digitalWrite(IN4, LOW);
+        return; // Emergency stop already executed in isSafeToMove()
+    }
+
+    // Double-check current distance before moving
+    float distance = measureDistanceFast();
+    if (distance <= CRITICAL_DISTANCE && distance > 0)
+    {
+        emergencyStopMotors();
         displayCarStatus("BLOCKED!");
         return;
     }
@@ -489,13 +617,17 @@ void carbackward()
 }
 void carturnright()
 {
-    // Check for obstacles before turning (turning forward motion)
-    if (currentDistance <= CRITICAL_DISTANCE && currentDistance > 0)
+    // CRITICAL SAFETY CHECK - Must be first
+    if (!isSafeToMove())
     {
-        digitalWrite(IN1, LOW);
-        digitalWrite(IN2, LOW);
-        digitalWrite(IN3, LOW);
-        digitalWrite(IN4, LOW);
+        return; // Emergency stop already executed
+    }
+
+    // Double-check current distance before turning
+    float distance = measureDistanceFast();
+    if (distance <= CRITICAL_DISTANCE && distance > 0)
+    {
+        emergencyStopMotors();
         displayCarStatus("BLOCKED!");
         return;
     }
@@ -511,13 +643,17 @@ void carturnright()
 }
 void carturnleft()
 {
-    // Check for obstacles before turning (turning forward motion)
-    if (currentDistance <= CRITICAL_DISTANCE && currentDistance > 0)
+    // CRITICAL SAFETY CHECK - Must be first
+    if (!isSafeToMove())
     {
-        digitalWrite(IN1, LOW);
-        digitalWrite(IN2, LOW);
-        digitalWrite(IN3, LOW);
-        digitalWrite(IN4, LOW);
+        return; // Emergency stop already executed
+    }
+
+    // Double-check current distance before turning
+    float distance = measureDistanceFast();
+    if (distance <= CRITICAL_DISTANCE && distance > 0)
+    {
+        emergencyStopMotors();
         displayCarStatus("BLOCKED!");
         return;
     }
