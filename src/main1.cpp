@@ -27,6 +27,7 @@
 #include <Time/ERaEspTime.hpp>
 #include <LiquidCrystal_I2C.h>
 #include <Wire.h>
+#include <esp_task_wdt.h> // For watchdog timer
 const char ssid[] = "eoh.io";
 const char pass[] = "Eoh@2020";
 
@@ -210,7 +211,7 @@ unsigned long getTimeCallback()
 volatile bool emergencyStop = false;
 volatile bool safeToMove = true;
 volatile unsigned long lastEmergencyCheck = 0;
-volatile bool needDistanceCheck = false;  // Flag to trigger distance check in main loop
+volatile bool needDistanceCheck = false; // Flag to trigger distance check in main loop
 
 // Hardware timer for emergency checks
 hw_timer_t *emergencyTimer = NULL;
@@ -273,39 +274,58 @@ float measureDistanceFast()
 }
 
 // CRITICAL: Emergency distance check (called by timer interrupt)
+// OPTIMIZED: Only set flag in ISR, do actual work in main loop
 void IRAM_ATTR emergencyDistanceCheck()
 {
     portENTER_CRITICAL_ISR(&timerMux);
 
-    // Quick distance measurement in interrupt
+    // Lightweight check - only set flag
     static unsigned long lastCheck = 0;
     unsigned long now = millis();
 
     if (now - lastCheck >= EMERGENCY_CHECK_INTERVAL)
     {
+        needDistanceCheck = true; // Just set flag, don't do heavy work
+        lastCheck = now;
+    }
+
+    portEXIT_CRITICAL_ISR(&timerMux);
+}
+
+// Function to handle emergency distance check (moved from ISR to main loop)
+void handleEmergencyDistanceCheck()
+{
+    portENTER_CRITICAL(&timerMux);
+    bool shouldCheck = needDistanceCheck;
+    needDistanceCheck = false; // Clear flag
+    portEXIT_CRITICAL(&timerMux);
+
+    if (shouldCheck)
+    {
         float distance = measureDistanceFast();
 
+        portENTER_CRITICAL(&timerMux);
         if (distance <= CRITICAL_DISTANCE && distance > 0)
         {
             emergencyStop = true;
             safeToMove = false;
-
-            // IMMEDIATE MOTOR SHUTDOWN
-            digitalWrite(IN1, LOW);
-            digitalWrite(IN2, LOW);
-            digitalWrite(IN3, LOW);
-            digitalWrite(IN4, LOW);
         }
         else if (distance > MIN_DISTANCE)
         {
             emergencyStop = false;
             safeToMove = true;
         }
+        portEXIT_CRITICAL(&timerMux);
 
-        lastCheck = now;
+        // Emergency motor shutdown if needed
+        if (distance <= CRITICAL_DISTANCE && distance > 0)
+        {
+            digitalWrite(IN1, LOW);
+            digitalWrite(IN2, LOW);
+            digitalWrite(IN3, LOW);
+            digitalWrite(IN4, LOW);
+        }
     }
-
-    portEXIT_CRITICAL_ISR(&timerMux);
 }
 
 // Emergency stop function - can be called from anywhere
@@ -441,7 +461,14 @@ void updateLCDWithDistance()
 
 void setup()
 {
-    Serial.begin(15200);
+    Serial.begin(115200); // Fixed baud rate to standard 115200
+
+    // Configure watchdog timer for 10 seconds
+    esp_task_wdt_init(10, true);
+    esp_task_wdt_add(NULL); // Add current task to watchdog
+
+    Serial.println("=== ESP32 Smart Car Starting ===");
+    Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
 
     // Initialize LCD first
     // Wire.begin(LCD_SDA, LCD_SCL); // Initialize I2C with custom pins
@@ -467,17 +494,21 @@ void setup()
     pinMode(WARNING_LED, OUTPUT);
     digitalWrite(WARNING_LED, LOW);
 
-    // Initialize emergency timer interrupt (1000 ticks = 1ms, so 50000 = 50ms)
+    // Initialize emergency timer interrupt (200ms interval instead of 50ms)
     emergencyTimer = timerBegin(0, 80, true); // Timer 0, prescaler 80 (1MHz), count up
     timerAttachInterrupt(emergencyTimer, &emergencyDistanceCheck, true);
-    timerAlarmWrite(emergencyTimer, 50000, true); // 50ms interval, repeat
+    timerAlarmWrite(emergencyTimer, 200000, true); // 200ms interval, repeat (reduced frequency)
     timerAlarmEnable(emergencyTimer);
 
     Serial.println("Emergency interrupt system initialized");
+    Serial.printf("Timer interval: %dms\n", EMERGENCY_CHECK_INTERVAL);
 
     displayCarStatus("CONNECTING");
     ERa.begin(ssid, pass);
     displayCarStatus("CONNECTED");
+
+    Serial.println("=== System Ready ===");
+    Serial.printf("Free heap after init: %d bytes\n", ESP.getFreeHeap());
 }
 
 ERA_WRITE(V0)
@@ -574,10 +605,22 @@ void smartcar()
 }
 void loop()
 {
+    // Feed watchdog timer to prevent reset
+    esp_task_wdt_reset();
+
     ERa.run();
-    checkObstacles();   // Check for obstacles
-    handleWarningLED(); // Handle LED warning
+    handleEmergencyDistanceCheck(); // Handle emergency checks from ISR flag
+    checkObstacles();               // Check for obstacles
+    handleWarningLED();             // Handle LED warning
     smartcar();
+
+    // System health monitoring
+    static unsigned long lastHealthCheck = 0;
+    if (millis() - lastHealthCheck > 5000)
+    { // Every 5 seconds
+        Serial.printf("System health - Free heap: %d bytes\n", ESP.getFreeHeap());
+        lastHealthCheck = millis();
+    }
 }
 
 void carforward()
