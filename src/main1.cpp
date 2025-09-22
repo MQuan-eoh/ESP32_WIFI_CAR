@@ -141,7 +141,7 @@ void cartankleft();
 void cartankright();
 void carStop();
 void smartcar();
-
+void updateLCDWithDistance();
 /* This function will run every time ERa is connected */
 ERA_CONNECTED()
 {
@@ -192,15 +192,15 @@ unsigned long getTimeCallback()
 // #define LCD_ADDRESS 0x27 // Common I2C address for LCD1602, try 0x3F if 0x27 doesn't work
 
 // HC-SR04 Ultrasonic Sensor pins
-#define TRIG_PIN 2  // GPIO2 - Trigger pin
-#define ECHO_PIN 4  // GPIO4 - Echo pin
+#define TRIG_PIN 2 // GPIO2 - Trigger pin
+#define ECHO_PIN 4 // GPIO4 - Echo pin
 
 // Warning LED pin
-#define WARNING_LED 15  // GPIO15 - Warning LED pin
+#define WARNING_LED 15 // GPIO15 - Warning LED pin
 
 // Obstacle detection settings
-#define MIN_DISTANCE 20  // Minimum safe distance in cm
-#define CRITICAL_DISTANCE 10  // Critical distance for immediate stop
+#define MIN_DISTANCE 20      // Minimum safe distance in cm
+#define CRITICAL_DISTANCE 10 // Critical distance for immediate stop
 
 // Initialize LCD (columns, rows, I2C address)
 LiquidCrystal_I2C lcd(0x27, 16, 2);
@@ -221,8 +221,8 @@ bool obstacleDetected = false;
 bool ledState = false;
 unsigned long lastLedBlink = 0;
 unsigned long lastDistanceCheck = 0;
-const unsigned long LED_BLINK_INTERVAL = 300;  // LED blink interval in ms
-const unsigned long DISTANCE_CHECK_INTERVAL = 100;  // Check distance every 100ms
+const unsigned long LED_BLINK_INTERVAL = 300;      // LED blink interval in ms
+const unsigned long DISTANCE_CHECK_INTERVAL = 100; // Check distance every 100ms
 
 // Function to display car status on LCD
 void displayCarStatus(String status)
@@ -240,34 +240,41 @@ void displayCarStatus(String status)
 }
 
 // Function to measure distance using HC-SR04
-float measureDistance() {
+float measureDistance()
+{
     digitalWrite(TRIG_PIN, LOW);
     delayMicroseconds(2);
     digitalWrite(TRIG_PIN, HIGH);
     delayMicroseconds(10);
     digitalWrite(TRIG_PIN, LOW);
-    
+
     long duration = pulseIn(ECHO_PIN, HIGH, 30000); // 30ms timeout
-    if (duration == 0) {
+    if (duration == 0)
+    {
         return 999; // Return large value if no echo received
     }
-    
+
     float distance = (duration * 0.034) / 2; // Convert to cm
     return distance;
 }
 
 // Function to handle LED warning for obstacles
-void handleWarningLED() {
+void handleWarningLED()
+{
     unsigned long currentTime = millis();
-    
-    if (obstacleDetected) {
+
+    if (obstacleDetected)
+    {
         // Blink LED when obstacle detected
-        if (currentTime - lastLedBlink >= LED_BLINK_INTERVAL) {
+        if (currentTime - lastLedBlink >= LED_BLINK_INTERVAL)
+        {
             ledState = !ledState;
             digitalWrite(WARNING_LED, ledState);
             lastLedBlink = currentTime;
         }
-    } else {
+    }
+    else
+    {
         // Turn off LED when no obstacle
         digitalWrite(WARNING_LED, LOW);
         ledState = false;
@@ -275,31 +282,40 @@ void handleWarningLED() {
 }
 
 // Function to check for obstacles
-void checkObstacles() {
+void checkObstacles()
+{
     unsigned long currentTime = millis();
-    
-    if (currentTime - lastDistanceCheck >= DISTANCE_CHECK_INTERVAL) {
+
+    if (currentTime - lastDistanceCheck >= DISTANCE_CHECK_INTERVAL)
+    {
         currentDistance = measureDistance();
-        
-        if (currentDistance <= MIN_DISTANCE && currentDistance > 0) {
+
+        if (currentDistance <= MIN_DISTANCE && currentDistance > 0)
+        {
             obstacleDetected = true;
-        } else {
+        }
+        else
+        {
             obstacleDetected = false;
         }
-        
+
         lastDistanceCheck = currentTime;
-        
+
         // Update LCD with distance info
         updateLCDWithDistance();
     }
 }
 
 // Function to update LCD with distance information
-void updateLCDWithDistance() {
+void updateLCDWithDistance()
+{
     lcd.setCursor(0, 1);
-    if (obstacleDetected) {
+    if (obstacleDetected)
+    {
         lcd.print("WARN: " + String((int)currentDistance) + "cm     ");
-    } else {
+    }
+    else
+    {
         lcd.print("Status: " + currentStatus + "    ");
     }
 }
@@ -325,11 +341,11 @@ void setup()
     pinMode(IN3, OUTPUT);
     pinMode(IN4, OUTPUT);
     pinMode(ENB, OUTPUT);
-    
+
     // Initialize HC-SR04 pins
     pinMode(TRIG_PIN, OUTPUT);
     pinMode(ECHO_PIN, INPUT);
-    
+
     // Initialize Warning LED pin
     pinMode(WARNING_LED, OUTPUT);
     digitalWrite(WARNING_LED, LOW);
@@ -434,15 +450,16 @@ void smartcar()
 void loop()
 {
     ERa.run();
-    checkObstacles();    // Check for obstacles
-    handleWarningLED();  // Handle LED warning
+    checkObstacles();   // Check for obstacles
+    handleWarningLED(); // Handle LED warning
     smartcar();
 }
 
 void carforward()
 {
     // Check for obstacles before moving forward
-    if (currentDistance <= CRITICAL_DISTANCE && currentDistance > 0) {
+    if (currentDistance <= CRITICAL_DISTANCE && currentDistance > 0)
+    {
         // Stop immediately if critical distance reached
         digitalWrite(IN1, LOW);
         digitalWrite(IN2, LOW);
@@ -451,7 +468,7 @@ void carforward()
         displayCarStatus("BLOCKED!");
         return;
     }
-    
+
     analogWrite(ENA, MOTOR_SPEED);
     analogWrite(ENB, MOTOR_SPEED);
     digitalWrite(IN1, LOW);
@@ -472,6 +489,17 @@ void carbackward()
 }
 void carturnright()
 {
+    // Check for obstacles before turning (turning forward motion)
+    if (currentDistance <= CRITICAL_DISTANCE && currentDistance > 0)
+    {
+        digitalWrite(IN1, LOW);
+        digitalWrite(IN2, LOW);
+        digitalWrite(IN3, LOW);
+        digitalWrite(IN4, LOW);
+        displayCarStatus("BLOCKED!");
+        return;
+    }
+
     // Right turn while moving forward: right motor slower, left motor faster
     analogWrite(ENA, TURN_SPEED_LOW);  // Right motor (IN1,IN2) slower
     analogWrite(ENB, TURN_SPEED_HIGH); // Left motor (IN3,IN4) faster
@@ -483,6 +511,17 @@ void carturnright()
 }
 void carturnleft()
 {
+    // Check for obstacles before turning (turning forward motion)
+    if (currentDistance <= CRITICAL_DISTANCE && currentDistance > 0)
+    {
+        digitalWrite(IN1, LOW);
+        digitalWrite(IN2, LOW);
+        digitalWrite(IN3, LOW);
+        digitalWrite(IN4, LOW);
+        displayCarStatus("BLOCKED!");
+        return;
+    }
+
     // Left turn while moving forward: left motor slower, right motor faster
     analogWrite(ENA, TURN_SPEED_HIGH); // Right motor (IN1,IN2) faster
     analogWrite(ENB, TURN_SPEED_LOW);  // Left motor (IN3,IN4) slower
