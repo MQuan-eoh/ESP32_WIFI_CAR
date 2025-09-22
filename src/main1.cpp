@@ -25,6 +25,8 @@
 #include <ERa.hpp>
 #include <Automation/ERaSmart.hpp>
 #include <Time/ERaEspTime.hpp>
+#include <LiquidCrystal_I2C.h>
+#include <Wire.h>
 const char ssid[] = "eoh.io";
 const char pass[] = "Eoh@2020";
 
@@ -169,8 +171,8 @@ unsigned long getTimeCallback()
 
 // Motor PINs
 #define ENA 5
-#define IN1 22
-#define IN2 21
+#define IN1 16 // Changed from 22 to avoid I2C SCL conflict
+#define IN2 17 // Changed from 21 to avoid I2C SDA conflict
 #define IN3 19
 #define IN4 18
 #define ENB 23
@@ -178,11 +180,30 @@ unsigned long getTimeCallback()
 // Fixed speed settings
 #define MOTOR_SPEED 255     // Full speed for straight movement (0-255)
 #define TURN_SPEED_HIGH 255 // Higher speed for outer wheel during turn
-#define TURN_SPEED_LOW 220  // Lower speed for inner wheel during turn
+#define TURN_SPEED_LOW 120  // Lower speed for inner wheel during turn
 
 // Tank turn speed settings for stationary rotation
 #define TANK_SPEED_HIGH 255 // Higher speed motor for tank turn
 #define TANK_SPEED_LOW 120  // Lower speed motor for tank turn (balanced force)
+
+// LCD I2C settings - ESP32 30pin module default I2C pins
+#define LCD_SDA 21 // GPIO21 - SDA pin
+#define LCD_SCL 22 // GPIO22 - SCL pin
+// #define LCD_ADDRESS 0x27 // Common I2C address for LCD1602, try 0x3F if 0x27 doesn't work
+
+// HC-SR04 Ultrasonic Sensor pins
+#define TRIG_PIN 2  // GPIO2 - Trigger pin
+#define ECHO_PIN 4  // GPIO4 - Echo pin
+
+// Warning LED pin
+#define WARNING_LED 15  // GPIO15 - Warning LED pin
+
+// Obstacle detection settings
+#define MIN_DISTANCE 20  // Minimum safe distance in cm
+#define CRITICAL_DISTANCE 10  // Critical distance for immediate stop
+
+// Initialize LCD (columns, rows, I2C address)
+LiquidCrystal_I2C lcd(0x27, 16, 2);
 
 bool car_forward = 0;
 bool car_backward = 0;
@@ -191,16 +212,131 @@ bool car_right = 0;
 bool car_tank_left = 0;
 bool car_tank_right = 0;
 
+// Variable to track current display status to avoid flickering
+String currentStatus = "";
+
+// Obstacle detection variables
+float currentDistance = 0;
+bool obstacleDetected = false;
+bool ledState = false;
+unsigned long lastLedBlink = 0;
+unsigned long lastDistanceCheck = 0;
+const unsigned long LED_BLINK_INTERVAL = 300;  // LED blink interval in ms
+const unsigned long DISTANCE_CHECK_INTERVAL = 100;  // Check distance every 100ms
+
+// Function to display car status on LCD
+void displayCarStatus(String status)
+{
+    // Only update LCD if status has changed to prevent flickering
+    if (currentStatus != status)
+    {
+        currentStatus = status;
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("ESP32 Smart Car");
+        lcd.setCursor(0, 1);
+        lcd.print("Status: " + status);
+    }
+}
+
+// Function to measure distance using HC-SR04
+float measureDistance() {
+    digitalWrite(TRIG_PIN, LOW);
+    delayMicroseconds(2);
+    digitalWrite(TRIG_PIN, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(TRIG_PIN, LOW);
+    
+    long duration = pulseIn(ECHO_PIN, HIGH, 30000); // 30ms timeout
+    if (duration == 0) {
+        return 999; // Return large value if no echo received
+    }
+    
+    float distance = (duration * 0.034) / 2; // Convert to cm
+    return distance;
+}
+
+// Function to handle LED warning for obstacles
+void handleWarningLED() {
+    unsigned long currentTime = millis();
+    
+    if (obstacleDetected) {
+        // Blink LED when obstacle detected
+        if (currentTime - lastLedBlink >= LED_BLINK_INTERVAL) {
+            ledState = !ledState;
+            digitalWrite(WARNING_LED, ledState);
+            lastLedBlink = currentTime;
+        }
+    } else {
+        // Turn off LED when no obstacle
+        digitalWrite(WARNING_LED, LOW);
+        ledState = false;
+    }
+}
+
+// Function to check for obstacles
+void checkObstacles() {
+    unsigned long currentTime = millis();
+    
+    if (currentTime - lastDistanceCheck >= DISTANCE_CHECK_INTERVAL) {
+        currentDistance = measureDistance();
+        
+        if (currentDistance <= MIN_DISTANCE && currentDistance > 0) {
+            obstacleDetected = true;
+        } else {
+            obstacleDetected = false;
+        }
+        
+        lastDistanceCheck = currentTime;
+        
+        // Update LCD with distance info
+        updateLCDWithDistance();
+    }
+}
+
+// Function to update LCD with distance information
+void updateLCDWithDistance() {
+    lcd.setCursor(0, 1);
+    if (obstacleDetected) {
+        lcd.print("WARN: " + String((int)currentDistance) + "cm     ");
+    } else {
+        lcd.print("Status: " + currentStatus + "    ");
+    }
+}
+
+// Function to initialize LCD
+
 void setup()
 {
-    Serial.begin(9600);
+    Serial.begin(15200);
+
+    // Initialize LCD first
+    // Wire.begin(LCD_SDA, LCD_SCL); // Initialize I2C with custom pins
+    lcd.init(); // initialize the lcd
+    lcd.init();
+    lcd.backlight();
+    displayCarStatus("READY");
+    delay(1000);
+
+    // Initialize motor pins
     pinMode(ENA, OUTPUT);
     pinMode(IN1, OUTPUT);
     pinMode(IN2, OUTPUT);
     pinMode(IN3, OUTPUT);
     pinMode(IN4, OUTPUT);
     pinMode(ENB, OUTPUT);
+    
+    // Initialize HC-SR04 pins
+    pinMode(TRIG_PIN, OUTPUT);
+    pinMode(ECHO_PIN, INPUT);
+    
+    // Initialize Warning LED pin
+    pinMode(WARNING_LED, OUTPUT);
+    digitalWrite(WARNING_LED, LOW);
+
+    displayCarStatus("CONNECTING");
     ERa.begin(ssid, pass);
+    displayCarStatus("CONNECTED");
 }
 
 ERA_WRITE(V0)
@@ -285,24 +421,44 @@ void smartcar()
 {
     if (car_forward == 0 && car_backward == 0 && car_left == 0 && car_right == 0 && car_tank_left == 0 && car_tank_right == 0)
     {
-        carStop();
+        // Only call displayCarStatus, don't call carStop to avoid redundant motor control
+        displayCarStatus("STOPPED");
+        // Set all motor pins to LOW (stop motors)
+        digitalWrite(IN1, LOW);
+        digitalWrite(IN2, LOW);
+        digitalWrite(IN3, LOW);
+        digitalWrite(IN4, LOW);
         Serial.println("carstop");
     }
 }
 void loop()
 {
     ERa.run();
+    checkObstacles();    // Check for obstacles
+    handleWarningLED();  // Handle LED warning
     smartcar();
 }
 
 void carforward()
 {
+    // Check for obstacles before moving forward
+    if (currentDistance <= CRITICAL_DISTANCE && currentDistance > 0) {
+        // Stop immediately if critical distance reached
+        digitalWrite(IN1, LOW);
+        digitalWrite(IN2, LOW);
+        digitalWrite(IN3, LOW);
+        digitalWrite(IN4, LOW);
+        displayCarStatus("BLOCKED!");
+        return;
+    }
+    
     analogWrite(ENA, MOTOR_SPEED);
     analogWrite(ENB, MOTOR_SPEED);
     digitalWrite(IN1, LOW);
     digitalWrite(IN2, HIGH);
     digitalWrite(IN3, LOW);
     digitalWrite(IN4, HIGH);
+    displayCarStatus("FORWARD");
 }
 void carbackward()
 {
@@ -312,26 +468,29 @@ void carbackward()
     digitalWrite(IN2, LOW);
     digitalWrite(IN3, HIGH);
     digitalWrite(IN4, LOW);
+    displayCarStatus("BACKWARD");
 }
 void carturnright()
 {
-    // Right turn while moving forward: both motors forward, right slower
-    analogWrite(ENA, TURN_SPEED_HIGH); // Left motor faster
-    analogWrite(ENB, TURN_SPEED_LOW);  // Right motor slower
-    digitalWrite(IN1, LOW);            // Left motor forward (same as carforward)
+    // Right turn while moving forward: right motor slower, left motor faster
+    analogWrite(ENA, TURN_SPEED_LOW);  // Right motor (IN1,IN2) slower
+    analogWrite(ENB, TURN_SPEED_HIGH); // Left motor (IN3,IN4) faster
+    digitalWrite(IN1, LOW);            // Right motor forward (same as carforward)
     digitalWrite(IN2, HIGH);
-    digitalWrite(IN3, LOW);            // Right motor forward (same as carforward)
+    digitalWrite(IN3, LOW); // Left motor forward (same as carforward)
     digitalWrite(IN4, HIGH);
+    displayCarStatus("TURN RIGHT");
 }
 void carturnleft()
 {
-    // Left turn while moving forward: both motors forward, left slower
-    analogWrite(ENA, TURN_SPEED_LOW);   // Left motor slower
-    analogWrite(ENB, TURN_SPEED_HIGH);  // Right motor faster
-    digitalWrite(IN1, LOW);             // Left motor forward (same as carforward)
+    // Left turn while moving forward: left motor slower, right motor faster
+    analogWrite(ENA, TURN_SPEED_HIGH); // Right motor (IN1,IN2) faster
+    analogWrite(ENB, TURN_SPEED_LOW);  // Left motor (IN3,IN4) slower
+    digitalWrite(IN1, LOW);            // Right motor forward (same as carforward)
     digitalWrite(IN2, HIGH);
-    digitalWrite(IN3, LOW);             // Right motor forward (same as carforward)
+    digitalWrite(IN3, LOW); // Left motor forward (same as carforward)
     digitalWrite(IN4, HIGH);
+    displayCarStatus("TURN LEFT");
 }
 void carStop()
 {
@@ -339,6 +498,7 @@ void carStop()
     digitalWrite(IN2, LOW);
     digitalWrite(IN3, LOW);
     digitalWrite(IN4, LOW);
+    displayCarStatus("STOPPED");
 }
 
 void cartankleft()
@@ -351,6 +511,7 @@ void cartankleft()
     digitalWrite(IN2, HIGH);
     digitalWrite(IN3, HIGH); // Right motor backward
     digitalWrite(IN4, LOW);
+    displayCarStatus("TANK LEFT");
 }
 
 void cartankright()
@@ -363,4 +524,5 @@ void cartankright()
     digitalWrite(IN2, LOW);
     digitalWrite(IN3, LOW); // Right motor forward
     digitalWrite(IN4, HIGH);
+    displayCarStatus("TANK RIGHT");
 }
